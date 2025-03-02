@@ -20,7 +20,11 @@ pip install -r requirements.txt
 ### Running
 
 ```bash
-uvicorn main:app --reload
+uvicorn main:app --reload --port 8002
+```
+
+```bash
+uvicorn Chat:app --reload --port 8001
 ```
 
 ## Frontend
