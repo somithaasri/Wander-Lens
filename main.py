@@ -1,15 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict
+from typing import Dict, List
 import os
 import requests
+import re
 from bs4 import BeautifulSoup
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
-import torch
-import time
+import googleapiclient.discovery
 
 app = FastAPI()
 
@@ -21,98 +21,93 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load environment variables
 load_dotenv()
 
-# Configuration
 CONFIG = {
     "serpapi_key": os.getenv("SERPAPI_KEY"),
-    "hf_token": os.getenv("HF_TOKEN")
+    "hf_token": os.getenv("HF_TOKEN"),
+    "youtube_api_key": os.getenv("YOUTUBE_API_KEY")
 }
 
 class TripPlanner:
     def __init__(self):
-        self.encoder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
         self.llm = InferenceClient(token=CONFIG["hf_token"])
-        self.articles = []
+        self.youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=CONFIG["youtube_api_key"])
         
-    def search_web(self, query: str):
-        """Search Google using SerpAPI"""
-        params = {
-            "q": query,
-            "api_key": os.getenv("SERPAPI_KEY"),
-            "num": 10
-        }
-        response = requests.get("https://serpapi.com/search", params=params)
-        return response.json().get("organic_results", [])
-    
-    def process_articles(self, results):
-        """Extract and clean article content using BeautifulSoup"""
-        articles = []
-        for result in results:
+    def get_vr_links(self, places: List[str]) -> Dict[str, str]:
+        """Get YouTube videos for places"""
+        vr_links = {}
+        for place in places:
             try:
-                response = requests.get(result["link"], timeout=10)
-                soup = BeautifulSoup(response.text, 'html.parser')
+                request = self.youtube.search().list(
+                    q= f"{place} 360",
+                    part="snippet",
+                    type="video",
+                    maxResults=1
+                )
+                response = request.execute()
                 
-                # Remove unwanted elements
-                for script in soup(["script", "style", "nav", "footer"]):
-                    script.decompose()
+                videos = []
+                for item in response.get("items", []):
+                    video_id = item["id"]["videoId"]
+                    video_url = f"https://www.youtube.com/watch?v={video_id}"
+                    videos.append(video_url)
                 
-                text = ' '.join([p.get_text() for p in soup.find_all('p')])
-                articles.append({
-                    "text": text[:2000],  # limit text length
-                    "title": soup.title.string if soup.title else "",
-                    "link": result["link"]
-                })
+                if videos:
+                    vr_links[place] = videos[0]
+                else:
+                    vr_links[place] = "No link found"
             except Exception as e:
-                print(f"Error processing {result['link']}: {str(e)}")
-                continue
-        return articles
-    
-    def store_in_memory(self, articles, location):
-        """Store articles in memory"""
-        for art in articles:
-            self.articles.append({
-                "location": location,
-                "title": art["title"],
-                "text": art["text"],
-                "link": art["link"]
-            })
-    
+                print(f"VR search error for {place}: {str(e)}")
+            finally:
+                print(f"VR links for {place}: {vr_links.get(place, 'No link found')}")
+        return vr_links
+
     def generate_itinerary(self, user_input):
-        """Main function to create travel plan"""
-        # 1. Search web for information
-        query = f"{user_input['trip_type']} activities near {user_input['location']} site:reddit.com OR site:tripadvisor.com"
-        web_results = self.search_web(query)
-        articles = self.process_articles(web_results)
-        
-        # 2. Store in memory
-        self.store_in_memory(articles, user_input["location"])
-        
-        # 3. Find relevant information
-        relevant_articles = [
-            art for art in self.articles if art["location"] == user_input["location"]
-        ]
-        
-        context = "\n".join([f"Source: {art['link']}\nContent: {art['title']}" for art in relevant_articles])
-        
+        # Generate base itinerary
         prompt = f"""Create a {user_input['days']}-day itinerary for {user_input['location']}.
         - Hotel: {user_input['hotel']}
         - Budget: {user_input['budget']}
         - Trip Type: {user_input['trip_type']}
         
-        Use these trusted sources:
-        {context}
+        Include hidden local gems and practical transportation info.
+        Format: Put each place name on a new line starting with '- '"""
         
-        Include hidden local gems and practical transportation info."""
-        
-        response = self.llm.text_generation(
+        response_text = self.llm.text_generation(
             prompt,
             model="mistralai/Mistral-7B-Instruct-v0.2",
-            max_new_tokens=1000
+            max_new_tokens=1500
         )
         
-        return response
+        try:
+            # Extract place names using improved regex
+            places = list(set(re.findall(r"-\s+([A-Za-z\s]+)(?::|$)", response_text)))
+            vr_links = self.get_vr_links(places)
+            
+            # Add VR links directly to itinerary items
+            formatted_response = []
+            for line in response_text.split("\n"):
+                clean_line = re.sub(r"\[.*?\]", "", line)  # Remove any existing markdown links
+                place_match = re.match(r"-\s+([A-Za-z\s]+)(?::|$)", clean_line)
+                if place_match:
+                    place = place_match.group(1).strip()
+                    if place in vr_links:
+                        clean_line += f" [YouTube]({vr_links[place]})"
+                formatted_response.append(clean_line)
+            
+            itinerary_items = []
+            for line in formatted_response:
+                item = {'text': line.strip()}
+                place_match = re.match(r"-\s+([A-Za-z\s]+)(?::|$)", line)
+                if place_match:
+                    place = place_match.group(1).strip()
+                    if place in vr_links and vr_links[place] != "No link found":
+                        item['youtube_url'] = vr_links[place]
+                itinerary_items.append(item)
+            return itinerary_items
+        except Exception as e:
+            print(f"Error generating itinerary: {str(e)}")
+            return [{"text": "Failed to generate itinerary. Please try again."}]
 
 class UserInput(BaseModel):
     location: str
@@ -129,3 +124,7 @@ async def generate_itinerary_endpoint(user_input: UserInput) -> Dict:
         return {"itinerary": itinerary}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8002)

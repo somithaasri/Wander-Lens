@@ -9,3 +9,4 @@ torch==2.2.0  # Compatible with Python 3.9
 newspaper3k
 fastapi==0.110.0
 uvicorn==0.32.0
+pydantic==2.7.0

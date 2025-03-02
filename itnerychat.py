@@ -102,17 +102,5 @@ class TripPlanner:
         return response
 
 if __name__ == "__main__":
-    # Example usage
-    planner = TripPlanner()
-    
-    user_input = {
-        "location": "Chennai, India",
-        "hotel": "ITC Grand Chola",
-        "days": 3,
-        "budget": "4000 rupees",
-        "trip_type": "adventure"
-    }
-    
-    print("Generating your itinerary...\n")
-    itinerary = planner.generate_itinerary(user_input)
-    print(itinerary)
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8003)
