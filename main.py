@@ -75,7 +75,7 @@ class TripPlanner:
         
         response_text = self.llm.text_generation(
             prompt,
-            model="mistralai/Mistral-7B-Instruct-v0.2",
+            model="mistralai/Mistral-7B-Instruct-v0.3",
             max_new_tokens=1500
         )
         
